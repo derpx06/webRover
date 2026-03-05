@@ -1,26 +1,20 @@
 """
 agent.py
-AI-powered browser agent: Gemini LLM + LangGraph ReAct + Playwright.
-
-Usage:
-    export GOOGLE_API_KEY="AIzaSyB1ign_npgd52HpmXPFshyVAiZ7BB_LbPg"
-    python agent.py
+General-purpose, high-performance browser agent.
 """
 
+import argparse
 import os
+import time as _time
 from dotenv import load_dotenv
 from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.prebuilt import create_react_agent
 
-# Load environment variables from .env file
 load_dotenv()
 
 from browser_tools import BrowserController
 
-# ---------------------------------------------------------------------------
-# Initialise browser
-# ---------------------------------------------------------------------------
 browser = BrowserController()
 browser.start()
 
@@ -30,98 +24,117 @@ browser.start()
 
 @tool
 def open_url(url: str) -> str:
-    """Open a URL in the browser. Input must be a full URL starting with http:// or https://."""
+    """Open any URL in the browser. Input must be a full URL (e.g. https://google.com)."""
     return browser.open_url(url)
 
+@tool
+def click_on_text(text: str) -> str:
+    """Click on a button, link, or element by its visible text. Perfect for navigation and menus."""
+    return browser.click_on_text(text)
 
 @tool
-def click(selector: str) -> str:
-    """Click an element on the current page using a CSS selector."""
-    return browser.click(selector)
+def click_by_index(index: int) -> str:
+    """Click an element by its index from get_elements(). The most reliable way to interact."""
+    return browser.click_by_index(index)
 
+@tool
+def type_text(selector: str, text: str) -> str:
+    """Type text into an input field (CSS selector). Use get_elements() to find the right field."""
+    return browser.type_text(selector, text)
+
+@tool
+def press_key(key: str) -> str:
+    """Press a keyboard key (e.g. 'Enter', 'Escape', 'ArrowDown')."""
+    return browser.press_key(key)
+
+@tool
+def get_elements(ignored: str = "") -> str:
+    """Scan the current page for all interactive elements and return them with indices [0, 1, 2...]."""
+    return browser.get_elements()
+
+@tool
+def scroll(direction: str) -> str:
+    """Scroll the page 'up' or 'down'."""
+    return browser.scroll(direction)
+
+@tool
+def wait_ms(ms: int) -> str:
+    """Wait for a number of milliseconds (e.g. 2000 = 2 seconds) for content to load."""
+    return browser.wait_ms(ms)
 
 @tool
 def read_text(ignored: str = "") -> str:
-    """Read and return all visible text from the current page body (up to 8000 chars). Input is ignored."""
+    """Read the main text content of the current page."""
     return browser.read_text()
 
+@tool
+def take_screenshot(filename: str) -> str:
+    """Save a snapshot of the current view to the 'screenshots/' folder for verification."""
+    return browser.take_screenshot(filename)
 
 @tool
 def close_browser(ignored: str = "") -> str:
-    """Close the browser. Call this as the final step when done."""
+    """Finished the task? Call this to close the browser session."""
     browser.close()
     return "Browser closed."
 
-
-tools = [open_url, click, read_text, close_browser]
+tools = [
+    open_url, click_on_text, click_by_index, type_text, 
+    press_key, get_elements, scroll, wait_ms, 
+    read_text, take_screenshot, close_browser
+]
 
 # ---------------------------------------------------------------------------
-# Gemini
+# Model
 # ---------------------------------------------------------------------------
 api_key = os.environ.get("GOOGLE_API_KEY")
-if not api_key:
-    raise EnvironmentError("GOOGLE_API_KEY not set. Run: export GOOGLE_API_KEY='your-key'")
-
 llm = ChatGoogleGenerativeAI(
     model="gemini-flash-latest",
     temperature=0,
     google_api_key=api_key,
 )
 
-# ---------------------------------------------------------------------------
-# Agent
-# ---------------------------------------------------------------------------
 agent = create_react_agent(llm, tools)
 
 # ---------------------------------------------------------------------------
-# Task — Search Google for Mumbai-Pune distance, then read an article
+# Execution
 # ---------------------------------------------------------------------------
-TASK = (
-    "You are a browser agent. Complete these steps in order:\n"
-    "1. Open https://duckduckgo.com/?q=distance+between+mumbai+and+pune\n"
-    "2. Read the page text and find the exact distance between Mumbai and Pune. State it clearly.\n"
-    "3. Find and click on the first organic result link on the page "
-    "(use the CSS selector 'a[data-testid=\"result-title-a\"]' or similar to click the first result).\n"
-    "4. Read the text of that article and give me a 2-sentence summary of what it says "
-    "about the Mumbai-Pune route.\n"
-    "5. Close the browser.\n"
-    "Be concise and report each finding step by step."
-)
 
-print("\n" + "=" * 60)
-print("🤖  Browser Agent")
-print(f"📋  Task: {TASK}")
-print("=" * 60 + "\n")
+def run_agent_with_retry(task: str, max_retries: int = 5):
+    prompt = (
+        f"You are a lightning-fast, highly capable browser agent. Task: {task}\n\n"
+        "CORE SUCCESS PRINCIPLES:\n"
+        "1. DIRECT ACTION: Go straight to the URL. Use search bars or direct navigation to save time.\n"
+        "2. PRECISION TOOLS: Use get_elements() to see exactly what's on screen. Interact via click_by_index() for flawless results.\n"
+        "3. GENERALIST: You handle all websites perfectly—news, social media, video, search, or tools.\n"
+        "4. ADAPTABILITY: If you encounter a popup (cookies, ads, logins), get_elements() and click it away immediately.\n"
+        "5. COMPLETION: Once you verified success, call close_browser()."
+    )
 
-# ---------------------------------------------------------------------------
-# Run with retry on 429 rate-limit errors
-# ---------------------------------------------------------------------------
-import time as _time
+    print(f"\n🚀  Executing: {task}")
 
-def run_agent_with_retry(max_retries: int = 5):
     for attempt in range(1, max_retries + 1):
         try:
-            for step in agent.stream(
-                {"messages": [("human", TASK)]},
-                stream_mode="values",
-            ):
+            for step in agent.stream({"messages": [("human", prompt)]}, stream_mode="values"):
                 msg = step["messages"][-1]
                 msg.pretty_print()
-                _time.sleep(1)
-            return  # success
+            return 
         except Exception as e:
             err = str(e)
             if "429" in err or "RESOURCE_EXHAUSTED" in err:
-                wait = 15 * attempt
-                print(f"\n⚠️  Rate limit hit (attempt {attempt}/{max_retries}). Waiting {wait}s...")
-                _time.sleep(wait)
+                wait_time = 5 * attempt
+                print(f"\n⚠️  Quota Limit (Attempt {attempt}/{max_retries}). Retrying in {wait_time}s...")
+                _time.sleep(wait_time)
             else:
-                raise  # non-rate-limit error — re-raise immediately
+                print(f"❌ Execution Error: {e}")
+                return
 
-try:
-    run_agent_with_retry()
-    print("\n" + "=" * 60)
-    print("✅  Agent finished.")
-    print("=" * 60)
-finally:
-    browser.close()
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("query")
+    args = parser.parse_args()
+
+    try:
+        run_agent_with_retry(args.query)
+    finally:
+        browser.close()
